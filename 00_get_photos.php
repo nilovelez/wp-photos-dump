@@ -241,10 +241,6 @@ function get_photos($base_url) {
 		echo "</form>";
 		echo "</div>";
 
-		echo "<div style='margin-top: 10px; color: #666;'>";
-		echo "Debug: total_photos=" . $total_photos . ", photos_processed=" . $photos_processed . ", auto=" . (isset($_GET['auto']) ? $_GET['auto'] : 'false') . ", should_advance=" . ($should_advance ? 'true' : 'false');
-		echo "</div>";
-
 		if ($should_advance) {
 			echo "<script>
 				document.querySelector('.next-page-button').click();
