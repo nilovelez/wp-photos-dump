@@ -16,78 +16,136 @@ https://wordpress.org/photos/wp-json/wp/v2/photos?per_page=100
 
 require('./vendor/autoload.php');
 
-function get_categories( $base_url ) {
+function get_tags($base_url) {
+	// Get current page from GET parameter, default to 1
+	$current_page = isset($_GET['page']) ? intval($_GET['page']) : 1;
+	
+	echo "<div class='pagination-info'>";
+	echo "<h3>Processing Tags Page " . $current_page . "</h3>";
+	echo "</div>";
 
-	$last_page = @file_get_contents('./data/page.txt');
-
-	if ( !intval( $last_page ) ) {
-		$last_page = 0;
+	// Connect to SQLite database
+	try {
+		$db = new PDO('sqlite:wp-photos.db');
+		// Enable foreign keys
+		$db->exec('PRAGMA foreign_keys = ON;');
+		// Set error mode to throw exceptions
+		$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+		// Set default fetch mode to associative array
+		$db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+	} catch (PDOException $e) {
+		echo "<div class='error-message'>";
+		echo "<p>Error connecting to database: " . $e->getMessage() . "</p>";
+		echo "</div>";
+		return;
 	}
-	$current_page = $last_page + 1;
-	echo "Page " . $current_page . "\n\n";
-	file_put_contents('./data/page.txt', $current_page);
-	//return;
 
 	$api = new RestClient([
-		'base_url' => $base_url, 
+		'base_url' => $base_url,
 	]);
 
-	
 	$result = $api->get(
 		"photo-tags",
 		[
-			'status' => "publish",
-			//'_fields' => "title,wp:featured_media,_links.wp:featuredmedia,_embedded",
-			'_fields' => "id,name,slug,count",
 			'per_page' => '100',
 			'page'     => $current_page
-		]);
-	// GET http://api.twitter.com/1.1/search/tweets.json?q=%23php
+		]
+	);
+
 	if($result->info->http_code == 200) {
+		$result = $result->decode_response();
+		$tags_processed = 0;
+		$total_tags = count($result);
 
-	    $result = $result->decode_response();
-	    foreach ($result as $resObj) {
+		echo "<div style='height: 200px; overflow-y: auto; margin-bottom: 20px; padding: 10px; border: 1px solid #ddd;'>";
+		foreach ($result as $tagObj) {
+			// Prepare the data for database insertion
+			$tag = [
+				'id' => $tagObj->id,
+				'name' => $tagObj->name,
+				'slug' => $tagObj->slug,
+				'count' => $tagObj->count
+			];
 
-	    	//print_r ( $resObj );
-	    	//exit;
+			// Check if tag already exists
+			$check = $db->prepare('SELECT id, count FROM tags WHERE id = :id');
+			$check->bindValue(':id', $tag['id'], PDO::PARAM_INT);
+			$check->execute();
 
-	    	
-	    	
-	    	$item = array();
-			$item['id'] = $resObj->id;
+			if ($existing = $check->fetch()) {
+				if ($existing['count'] == $tag['count']) {
+					echo "<p>Tag " . $tag['id'] . " (" . $tag['name'] . ") already synced with same count</p>";
+					continue;
+				}
+			}
 
-			$item['name'] = str_replace(
-				array("'"),
-				array("\'"),
-				$resObj->name
-			);
-			$item['slug'] = $resObj->slug;
-			$item['count'] = $resObj->count;
+			// Prepare the SQL statement
+			$stmt = $db->prepare('
+				INSERT OR REPLACE INTO tags (
+					id, name, slug, count
+				) VALUES (
+					:id, :name, :slug, :count
+				)
+			');
 
+			// Bind the values
+			$stmt->bindValue(':id', $tag['id'], PDO::PARAM_INT);
+			$stmt->bindValue(':name', $tag['name'], PDO::PARAM_STR);
+			$stmt->bindValue(':slug', $tag['slug'], PDO::PARAM_STR);
+			$stmt->bindValue(':count', $tag['count'], PDO::PARAM_INT);
 
+			// Execute the statement
+			if ($stmt->execute()) {
+				$tags_processed++;
+			} else {
+				echo "<div class='error-message'>";
+				echo "<p>Error saving tag ID " . $tag['id'] . " to database</p>";
+				echo "</div>";
+			}
+		}
+		echo "</div>";
 
-			print_r($item);
+		echo "<div class='processing-summary'>";
+		echo "<p>Processed " . $tags_processed . " tags from page " . $current_page . "</p>";
+		echo "</div>";
 
-			$item_html  = "'". $item['slug'] . "' => array("."\n";
-			$item_html .= "	'id'           => " . $item['id'] . ",\n";
-			$item_html .= "	'name'         => '" . $item['name'] . "',\n";
-			$item_html .= "	'slug'         => '" . $item['slug'] . "',\n";
-			$item_html .= "	'count'         => " . $item['count'] . ",\n";
-			$item_html .= '),'."\n";
-
-			file_put_contents('./data/tags.php', $item_html, FILE_APPEND);
-
+		// Add next page button
+		echo "<div class='pagination-controls'>";
+		$next_page_url = '?step=tags&page=' . ($current_page + 1);
+		$is_auto_enabled = isset($_GET['auto']) && $_GET['auto'] === 'true';
+		$should_advance = $is_auto_enabled && $total_tags > 0;
 		
+		echo "<form action='' method='get'>";
+		echo "<input type='hidden' name='step' value='tags'>";
+		echo "<input type='hidden' name='page' value='" . ($current_page + 1) . "'>";
+		echo "<label style='margin-left: 20px;'><input type='checkbox' id='autoAdvance' name='auto' value='true' " . ($is_auto_enabled ? 'checked' : '') . "> Advance automatically</label>";
+		echo "<input type='submit' value='Process Next Page' class='next-page-button'>";
+		echo "</form>";
+		echo "</div>";
 
-	    }
+		echo "<div style='margin-top: 10px; color: #666;'>";
+		echo "Debug: total_tags=" . $total_tags . ", tags_processed=" . $tags_processed . ", auto=" . (isset($_GET['auto']) ? $_GET['auto'] : 'false') . ", should_advance=" . ($should_advance ? 'true' : 'false');
+		echo "</div>";
 
+		if ($should_advance) {
+			echo "<script>
+				document.querySelector('.next-page-button').click();
+			</script>";
+		}
 
 	} else {
-		var_dump($result);
+		echo "<div class='error-message'>";
+		echo "<p>Error fetching tags: HTTP " . $result->info->http_code . "</p>";
+		echo "<p>Response: " . $result->response . "</p>";
+		echo "</div>";
 	}
 
+	// Close the database connection
+	$db = null;
 }
 
 $base_url = 'https://wordpress.org/photos/wp-json/wp/v2/';
 
-get_categories( $base_url );
+if ( $tags = get_tags( $base_url ) ) {
+	var_dump( $tags );
+}

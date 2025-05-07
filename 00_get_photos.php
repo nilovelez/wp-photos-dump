@@ -10,12 +10,6 @@ _fields=author,id,excerpt,title,link
 */
 
 /*
-https://zaragoza.wordcamp.org/2025/wp-json/wp/v2/
-
-https://zaragoza.wordcamp.org/2025/
-
-wp-json/wp/v2/sessions?status=publish&_fields=title,meta._wcpt_session_time,meta._wcpt_speaker_id?per_page=100
-
 wp-json/wp/v2/speakers?status=publish&_fields=id,title?per_page=100
 
 
@@ -101,121 +95,171 @@ $webp2jpeg = array(
 
 require('./vendor/autoload.php');
 
-function get_photos( $base_url ) {
-
+function get_photos($base_url) {
 	global $webp2jpeg;
 
-	$last_page = @file_get_contents('./data/page.txt');
+	// Get current page from GET parameter, default to 1
+	$current_page = isset($_GET['page']) ? intval($_GET['page']) : 1;
+	
+	echo "<div class='pagination-info'>";
+	echo "<h3>Processing Page " . $current_page . "</h3>";
+	echo "</div>";
 
-	if ( !intval( $last_page ) ) {
-		$last_page = 0;
+	// Connect to SQLite database
+	try {
+		$db = new PDO('sqlite:wp-photos.db');
+		// Enable foreign keys
+		$db->exec('PRAGMA foreign_keys = ON;');
+		// Set error mode to throw exceptions
+		$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+		// Set default fetch mode to associative array
+		$db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+	} catch (PDOException $e) {
+		echo "<div class='error-message'>";
+		echo "<p>Error connecting to database: " . $e->getMessage() . "</p>";
+		echo "</div>";
+		return;
 	}
-	$current_page = $last_page + 1;
-	echo "Page " . $current_page . "\n\n";
-	file_put_contents('./data/page.txt', $current_page);
-	//return;
 
 	$api = new RestClient([
-		'base_url' => $base_url, 
-		// 'format' => "json", 
-		// https://dev.twitter.com/docs/auth/application-only-auth
-		//'headers' => ['Authorization' => 'Bearer '.OAUTH_BEARER], 
+		'base_url' => $base_url,
 	]);
 
-	
 	$result = $api->get(
 		"photos",
 		[
 			'status' => "publish",
-			//'_fields' => "title,wp:featured_media,_links.wp:featuredmedia,_embedded",
-			'_fields' => "id,slug,author,content,date_gmt,featured_media,photo-thumbnail-url,photo-categories,photo-colors,photo-orientations,photo-tags,_links.author",
-			'orderby'  => 'date',
-			'order'    => 'asc',
+			'_fields' => "id,slug,author,content,modified_gmt,featured_media,photo-thumbnail-url,photo-categories,photo-colors,photo-orientations,photo-tags,_links.author",
+			'orderby'  => 'modified',
+			'order'    => 'desc',
 			'per_page' => '100',
 			'page'     => $current_page
-		]);
-	// GET http://api.twitter.com/1.1/search/tweets.json?q=%23php
+		]
+	);
+
 	if($result->info->http_code == 200) {
+		$result = $result->decode_response();
+		$photos_processed = 0;
+		$photos_skipped = 0;
+		$total_photos = count($result);
 
-	    $result = $result->decode_response();
-	    foreach ($result as $photoObj) {
+		echo "<div class='scrollable-content'>";
+		foreach ($result as $photoObj) {
+			$img_url = preg_replace('/-.*?(?=\.)/', '', $photoObj->{'photo-thumbnail-url'});
 
-	    	//print_r ( $photoObj );
-	    	//exit();
-
-	    	$img_url = preg_replace('/-.*?(?=\.)/', '', $photoObj->{'photo-thumbnail-url'});
-
-	    	if ( "webp" == substr( $img_url, -4 ) ) {
-
-				echo substr( $img_url, -4 ) . "\n";
-
-				if ( in_array( $img_url , $webp2jpeg) ) {
+			if ("webp" == substr($img_url, -4)) {
+				if (in_array($img_url, $webp2jpeg)) {
 					$img_url = str_replace('.webp', '.jpeg', $img_url);
 				} else {
 					$img_url = str_replace('.webp', '.jpg', $img_url);
 				}
-				echo $img_url . "\n";
 			}
-	    	
-	    	$photo = array();
-			$photo['id'] = $photoObj->id;
-			$photo['date'] = strtotime(date($photoObj->date_gmt));
-			$photo['slug'] = $photoObj->slug;
-			$photo['author'] = $photoObj->author;
-			$photo['author_href'] = $photoObj->{'_links'}->author[0]->href;
-			$photo['featured_media'] = $photoObj->featured_media;
-			$photo['content'] = strip_tags($photoObj->content->rendered);
-			$photo['content'] = str_replace(
-				array('<p>', '</p>', "\n", "'"),
-				array('',    '',     '',   "\'"),
-				$photoObj->content->rendered
-			);
-			$photo['img_url'] = $img_url;
+			
+			// Prepare the data for database insertion
+			$photo = [
+				'id' => $photoObj->id,
+				'slug' => $photoObj->slug,
+				'date' => strtotime(date($photoObj->modified_gmt)),
+				'img_id' => $photoObj->featured_media,
+				'img_url' => $img_url,
+				'author' => $photoObj->author,
+				'author_href' => $photoObj->{'_links'}->author[0]->href,
+				'categories' => empty($photoObj->{'photo-categories'}) ? null : serialize($photoObj->{'photo-categories'}),
+				'colors' => empty($photoObj->{'photo-colors'}) ? null : serialize($photoObj->{'photo-colors'}),
+				'orientations' => empty($photoObj->{'photo-orientations'}) ? null : serialize($photoObj->{'photo-orientations'}),
+				'tags' => empty($photoObj->{'photo-tags'}) ? null : serialize($photoObj->{'photo-tags'}),
+				'content' => str_replace(
+					array('<p>', '</p>', "\n", "'"),
+					array('',    '',     '',   "\'"),
+					$photoObj->content->rendered
+				)
+			];
 
-			$photo['photo-categories'] = $photoObj->{'photo-categories'};
-			$photo['photo-colors'] = $photoObj->{'photo-colors'};
-			$photo['photo-orientations'] = $photoObj->{'photo-orientations'};
-			$photo['photo-tags'] = $photoObj->{'photo-tags'};
+			// Check if photo already exists with same id and date
+			$check = $db->prepare('SELECT id FROM photos WHERE id = :id AND date = :date');
+			$check->bindValue(':id', $photo['id'], PDO::PARAM_INT);
+			$check->bindValue(':date', $photo['date'], PDO::PARAM_INT);
+			$check->execute();
 
-			//print_r($photo);
+			if ($check->fetch()) {
+				$photos_skipped++;
+				continue;
+			}
 
-			$photo_html  = "'". $photo['slug'] . "' => array("."\n";
-			$photo_html .= "	'id'           => " . $photo['id'] . ",\n";
-			$photo_html .= "	'slug'         => '" . $photo['slug'] . "',\n";
-			$photo_html .= "	'date'         => " . $photo['date'] . ",\n";
-			$photo_html .= "	'img_id'       => " . $photo['featured_media'] . ",\n";
-			$photo_html .= "	'img_url'      => '" . $img_url . "',\n";
-			$photo_html .= "	'author'       => " . $photo['author'] . ",\n";
-			$photo_html .= "	'author_href'  => '" . $photo['author_href'] . "',\n";
-			$photo_html .= "	'categories'   => array(" . implode(',', $photo['photo-categories']) . "),\n";
-			$photo_html .= "	'colors'       => array(" . implode(',', $photo['photo-colors']) . "),\n";
-			$photo_html .= "	'orientations' => array(" . implode(',', $photo['photo-orientations']) . "),\n";
-			$photo_html .= "	'tags'         => array(" . implode(',', $photo['photo-tags']) . "),\n";
-			$photo_html .= "	'content'      => '" . $photo['content'] . "',\n";
-			$photo_html .= '),'."\n";
+			// Prepare the SQL statement
+			$stmt = $db->prepare('
+				INSERT OR REPLACE INTO photos (
+					id, slug, date, img_id, img_url, author, author_href,
+					categories, colors, orientations, tags, content
+				) VALUES (
+					:id, :slug, :date, :img_id, :img_url, :author, :author_href,
+					:categories, :colors, :orientations, :tags, :content
+				)
+			');
 
-			file_put_contents('./data/photos.php', $photo_html, FILE_APPEND);
+			// Bind the values
+			$stmt->bindValue(':id', $photo['id'], PDO::PARAM_INT);
+			$stmt->bindValue(':slug', $photo['slug'], PDO::PARAM_STR);
+			$stmt->bindValue(':date', $photo['date'], PDO::PARAM_INT);
+			$stmt->bindValue(':img_id', $photo['img_id'], PDO::PARAM_INT);
+			$stmt->bindValue(':img_url', $photo['img_url'], PDO::PARAM_STR);
+			$stmt->bindValue(':author', $photo['author'], PDO::PARAM_STR);
+			$stmt->bindValue(':author_href', $photo['author_href'], PDO::PARAM_STR);
+			$stmt->bindValue(':categories', $photo['categories'], PDO::PARAM_STR);
+			$stmt->bindValue(':colors', $photo['colors'], PDO::PARAM_STR);
+			$stmt->bindValue(':orientations', $photo['orientations'], PDO::PARAM_STR);
+			$stmt->bindValue(':tags', $photo['tags'], PDO::PARAM_STR);
+			$stmt->bindValue(':content', $photo['content'], PDO::PARAM_STR);
 
+			// Execute the statement
+			if ($stmt->execute()) {
+				echo "<p>Photo " . $photo['id'] . " processed</p>";
+				$photos_processed++;
+			} else {
+				echo "<div class='error-message'>";
+				echo "<p>Error saving photo ID " . $photo['id'] . " to database</p>";
+				echo "</div>";
+			}
+		}
+		echo "</div>";
+
+		echo "<div class='processing-summary'>";
+		echo "<p>Retrieved " . $total_photos . " photos and processed " . $photos_processed . " photos from page " . $current_page . "</p>";
+		echo "</div>";
+
+		// Add next page button
+		echo "<div class='pagination-controls'>";
+		$next_page_url = '?step=photos&page=' . ($current_page + 1);
+		$is_auto_enabled = isset($_GET['auto']) && $_GET['auto'] === 'true';
+		$should_advance = $is_auto_enabled && $total_photos > 0;
 		
+		echo "<form action='' method='get'>";
+		echo "<input type='hidden' name='step' value='photos'>";
+		echo "<input type='hidden' name='page' value='" . ($current_page + 1) . "'>";
+		echo "<label style='margin-left: 20px;'><input type='checkbox' id='autoAdvance' name='auto' value='true' " . ($is_auto_enabled ? 'checked' : '') . "> Advance automatically</label>";
+		echo "<input type='submit' value='Process Next Page' class='next-page-button'>";
+		echo "</form>";
+		echo "</div>";
 
-	    }
+		echo "<div style='margin-top: 10px; color: #666;'>";
+		echo "Debug: total_photos=" . $total_photos . ", photos_processed=" . $photos_processed . ", auto=" . (isset($_GET['auto']) ? $_GET['auto'] : 'false') . ", should_advance=" . ($should_advance ? 'true' : 'false');
+		echo "</div>";
 
-
-
+		if ($should_advance) {
+			echo "<script>
+				document.querySelector('.next-page-button').click();
+			</script>";
+		}
 
 	} else {
-		var_dump($result);
+		echo "<div class='error-message'>";
+		echo "<p>Error fetching photos: HTTP " . $result->info->http_code . "</p>";
+		echo "<p>Response: " . $result->response . "</p>";
+		echo "</div>";
 	}
 
-	/*
-	if ( $sessions ) {
-	    // Work with the returned content
-	    foreach ($content as $post) {
-	        $sessions[] = $post->title->rendered;
-	    }
-	    return $sessions;
-	}
-	*/
+	// Close the database connection
+	$db = null;
 }
 
 $base_url = 'https://wordpress.org/photos/wp-json/wp/v2/';
